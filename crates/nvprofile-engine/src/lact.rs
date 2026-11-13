@@ -359,12 +359,7 @@ fn call(socket: &std::path::Path, command: &str, args: Option<Value>) -> Result<
     stream.set_read_timeout(Some(IO_TIMEOUT)).map_err(unavailable)?;
     stream.set_write_timeout(Some(IO_TIMEOUT)).map_err(unavailable)?;
 
-    let mut req = json!({ "command": command });
-    if let Some(a) = args {
-        req["args"] = a;
-    }
-    let mut line = req.to_string();
-    line.push('\n');
+    let line = encode_request(command, args.as_ref());
     stream.write_all(line.as_bytes()).map_err(unavailable)?;
 
     let mut reply = String::new();
@@ -374,6 +369,39 @@ fn call(socket: &std::path::Path, command: &str, args: Option<Value>) -> Result<
         Some("ok") => Ok(v["data"].clone()),
         Some("error") => Err(EngineError::Daemon(error_chain(&v["data"]))),
         _ => Err(EngineError::Protocol(format!("{command}: missing status in reply"))),
+    }
+}
+
+/// Encode one request line. `command` MUST precede `args`: the daemon's `Request` is an
+/// adjacently tagged serde enum, and when `args` comes first serde buffers it, which
+/// loses integer map keys (`curve: {"50": ..}` -> "invalid type: string "50", expected i32").
+/// `serde_json::json!` sorts keys alphabetically (args < command), so build it by hand.
+fn encode_request(command: &str, args: Option<&Value>) -> String {
+    #[derive(serde::Serialize)]
+    struct Request<'a> {
+        command: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        args: Option<&'a Value>,
+    }
+    let mut line = serde_json::to_string(&Request { command, args }).expect("request serializes");
+    line.push('\n');
+    line
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    #[test]
+    fn command_key_precedes_args() {
+        let line = encode_request("set_gpu_config", Some(&json!({ "config": { "curve": { "50": 0.3 } }, "id": "x" })));
+        assert!(line.starts_with(r#"{"command":"set_gpu_config","args":"#), "{line}");
+        assert!(line.ends_with('\n'));
+    }
+
+    #[test]
+    fn args_omitted_when_none() {
+        assert_eq!(encode_request("list_devices", None), "{\"command\":\"list_devices\"}\n");
     }
 }
 
