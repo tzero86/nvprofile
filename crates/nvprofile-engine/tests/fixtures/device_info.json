@@ -1,0 +1,40 @@
+{
+ "status": "ok",
+ "data": {
+  "pci_info": {
+   "device_pci_info": {
+    "vendor_id": "10DE",
+    "vendor": "NVIDIA Corporation",
+    "model_id": "2208",
+    "model": "GA102 [GeForce RTX 3080 Ti]"
+   },
+   "subsystem_pci_info": {
+    "vendor_id": "1569",
+    "vendor": "Palit Microsystems Inc.",
+    "model_id": "2208",
+    "model": "Palit RTX 3080 Ti Gaming Pro"
+   }
+  },
+  "vulkan_instances": [],
+  "opencl_instances": [],
+  "driver": "nvidia 595.99.02",
+  "vbios_version": "94.02.71.80.52",
+  "link_info": {
+   "current_width": "16",
+   "current_speed": "16 GT/s Gen 4",
+   "max_width": "16",
+   "max_speed": "16 GT/s Gen 4"
+  },
+  "drm_info": {
+   "device_name": "NVIDIA GeForce RTX 3080 Ti",
+   "family_name": "Ampere",
+   "cuda_cores": 10240,
+   "vram_type": "GDDR6x",
+   "vram_bit_width": 384
+  },
+  "flags": [
+   "ConfigurableFanControl",
+   "AutoFanThreshold"
+  ]
+ }
+}

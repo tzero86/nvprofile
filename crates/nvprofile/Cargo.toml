@@ -1,0 +1,18 @@
+[package]
+name = "nvprofile"
+description = "Thermal/power profile manager for NVIDIA GPUs on Linux (CLI + TUI on top of nvprofile-engine)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nvprofile"
+path = "src/main.rs"
+
+[dependencies]
+nvprofile-engine = { path = "../nvprofile-engine" }
+serde.workspace = true
+serde_json.workspace = true
+ratatui = "0.29"
+crossterm = "0.28"
+clap = { version = "4", features = ["derive"] }

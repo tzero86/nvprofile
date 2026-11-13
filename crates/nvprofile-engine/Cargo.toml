@@ -1,0 +1,15 @@
+[package]
+name = "nvprofile-engine"
+description = "UI-agnostic engine for managing NVIDIA GPU power/fan/V-F profiles through the LACT daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_norway.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

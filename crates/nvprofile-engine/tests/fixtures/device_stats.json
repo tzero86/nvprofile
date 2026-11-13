@@ -1,0 +1,188 @@
+{
+ "status": "ok",
+ "data": {
+  "fan": {
+   "control_enabled": true,
+   "control_mode": "static",
+   "static_speed": 0.51,
+   "curve": {
+    "40": 0.51,
+    "80": 0.51
+   },
+   "pwm_current": 130,
+   "speed_current": 1991,
+   "pwm_max": 255,
+   "pwm_min": 77,
+   "spindown_delay_ms": 0,
+   "change_threshold": 0,
+   "auto_threshold": 0,
+   "pmfw_info": {}
+  },
+  "nvidia_thermal_info": {
+   "target_temp": {
+    "current": 83,
+    "allowed_range": [
+     65,
+     91
+    ]
+   },
+   "target_temp_default": 83
+  },
+  "clockspeed": {
+   "gpu_clockspeed": 450,
+   "vram_clockspeed": 9251,
+   "sensors": {
+    "SM": 450,
+    "Video": 1380,
+    "XBAR": 1485,
+    "SYS": 1320,
+    "HUB": 450,
+    "Host": 1350,
+    "Display": 675,
+    "Power": 540,
+    "MSD": 1380,
+    "Utils": 108
+   }
+  },
+  "voltage": {
+   "gpu": 756,
+   "sensors": {}
+  },
+  "vram": {
+   "total": 12884901888,
+   "used": 8396603392
+  },
+  "power": {
+   "current": 177.793,
+   "cap_current": 178.5,
+   "cap_max": 365.0,
+   "cap_min": 100.0,
+   "cap_default": 350.0
+  },
+  "temps": {
+   "GPU": {
+    "current": 51.0,
+    "crit": 98.0,
+    "crit_hyst": null,
+    "primary": true,
+    "display_only": false
+   },
+   "GPU Hotspot": {
+    "current": 59.0,
+    "crit": null,
+    "crit_hyst": null,
+    "primary": true,
+    "display_only": true
+   },
+   "VRAM": {
+    "current": 55.0,
+    "crit": null,
+    "crit_hyst": null,
+    "primary": true,
+    "display_only": true
+   },
+   "VRAM Chip A0": {
+    "current": 62.0,
+    "crit": null,
+    "crit_hyst": null,
+    "primary": false,
+    "display_only": true
+   },
+   "VRAM Chip A1": {
+    "current": 60.0,
+    "crit": null,
+    "crit_hyst": null,
+    "primary": false,
+    "display_only": true
+   },
+   "VRAM Chip B0": {
+    "current": 56.0,
+    "crit": null,
+    "crit_hyst": null,
+    "primary": false,
+    "display_only": true
+   },
+   "VRAM Chip B1": {
+    "current": 60.0,
+    "crit": null,
+    "crit_hyst": null,
+    "primary": false,
+    "display_only": true
+   },
+   "VRAM Chip C0": {
+    "current": 54.0,
+    "crit": null,
+    "crit_hyst": null,
+    "primary": false,
+    "display_only": true
+   },
+   "VRAM Chip C1": {
+    "current": 58.0,
+    "crit": null,
+    "crit_hyst": null,
+    "primary": false,
+    "display_only": true
+   },
+   "VRAM Chip D0": {
+    "current": 62.0,
+    "crit": null,
+    "crit_hyst": null,
+    "primary": false,
+    "display_only": true
+   },
+   "VRAM Chip D1": {
+    "current": 58.0,
+    "crit": null,
+    "crit_hyst": null,
+    "primary": false,
+    "display_only": true
+   },
+   "VRAM Chip E0": {
+    "current": 56.0,
+    "crit": null,
+    "crit_hyst": null,
+    "primary": false,
+    "display_only": true
+   },
+   "VRAM Chip E1": {
+    "current": 60.0,
+    "crit": null,
+    "crit_hyst": null,
+    "primary": false,
+    "display_only": true
+   },
+   "VRAM Chip F0": {
+    "current": 60.0,
+    "crit": null,
+    "crit_hyst": null,
+    "primary": false,
+    "display_only": true
+   },
+   "VRAM Chip F1": {
+    "current": 62.0,
+    "crit": null,
+    "crit_hyst": null,
+    "primary": false,
+    "display_only": true
+   }
+  },
+  "busy_percent": 100,
+  "active_power_mizer_mode": "Auto",
+  "supported_power_mizer_modes": [
+   "Auto",
+   "Adaptive",
+   "PreferMaximumPerformance"
+  ],
+  "active_power_states": {
+   "core": {
+    "Index": 2
+   },
+   "memory": {
+    "Index": 2
+   }
+  },
+  "throttle_info": {
+   "SW_POWER_CAP": []
+  }
+ }
+}
