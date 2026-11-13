@@ -7,6 +7,8 @@ It drives the [LACT](https://github.com/ilya-zlobintsev/LACT) daemon, so it work
 Born from replacing an MSI Afterburner "Profile 5" (power cap + fixed fan + custom V/F curve)
 on Ubuntu, where the stock driver fan curve made renders loud.
 
+![nvprofile TUI showing live gauges and presets](docs/tui.png)
+
 ## Requirements
 
 - Linux with the proprietary NVIDIA driver (NVML and NvAPI libraries; tested on 595.x, RTX 3080 Ti)
