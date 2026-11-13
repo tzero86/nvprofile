@@ -2,6 +2,7 @@
 
 mod cli;
 mod ctx;
+mod hit;
 mod tui;
 
 use std::process::ExitCode;

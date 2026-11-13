@@ -5,16 +5,22 @@ use std::collections::VecDeque;
 use std::io;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
+use crossterm::execute;
 use nvprofile_engine::lact_config::{self, LactGpuConfig};
 use nvprofile_engine::*;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Gauge, List, ListItem, ListState, Paragraph, Sparkline, Wrap};
+use ratatui::symbols;
+use ratatui::widgets::{Block, LineGauge, List, ListItem, ListState, Paragraph, Sparkline, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::ctx::{run_privileged, settle, Ctx};
+use crate::hit::{self, Button, Click, ClickTracker, Seg};
 
 const HISTORY: usize = 120;
 const POWER_STEP: f64 = 5.0;
@@ -43,6 +49,18 @@ struct Msg {
     ok: bool,
 }
 
+/// Screen rects of the last drawn frame; mouse hit-testing reads these.
+#[derive(Default)]
+struct Rects {
+    list: Rect,
+    list_inner: Rect,
+    list_offset: usize,
+    details: Rect,
+    buttons: Vec<(Button, Rect)>,
+    /// (row, left arrow, right arrow) of the power and fan rows while editing.
+    edit_rows: Vec<(Rect, Rect, Rect)>,
+}
+
 struct App<'a> {
     ctx: &'a Ctx,
     backend: LactBackend,
@@ -61,14 +79,16 @@ struct App<'a> {
     mode: Mode,
     msg: Msg,
     link_error: Option<String>,
+    rects: Rects,
+    clicks: ClickTracker,
 }
 
 pub fn run(ctx: &Ctx) -> R {
     let backend = ctx.backend()?;
     let mut app = App::new(ctx, backend)?;
-    let mut term = ratatui::init();
+    let mut term = enter_tui();
     let res = event_loop(&mut term, &mut app);
-    ratatui::restore();
+    leave_tui();
     res.map_err(|e| EngineError::Io { path: "terminal".into(), message: e.to_string() })
 }
 
@@ -91,8 +111,10 @@ impl<'a> App<'a> {
             powers: VecDeque::new(),
             fans: VecDeque::new(),
             mode: Mode::Normal,
-            msg: Msg { text: "↑↓ select · Enter apply · r reset · e edit copy · d delete · q quit".into(), ok: true },
+            msg: Msg { text: String::new(), ok: true },
             link_error: None,
+            rects: Rects::default(),
+            clicks: ClickTracker::default(),
         };
         app.refresh();
         // Start on the active preset when there is one.
@@ -171,9 +193,31 @@ fn push(q: &mut VecDeque<u64>, v: Option<f64>) {
     }
 }
 
+/// Enter the alternate screen with raw mode and mouse reporting. A panic hook
+/// (installed once) turns mouse reporting off again before the panic message.
+fn enter_tui() -> DefaultTerminal {
+    let term = ratatui::init();
+    let _ = execute!(io::stdout(), EnableMouseCapture);
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = execute!(io::stdout(), DisableMouseCapture);
+            prev(info);
+        }));
+    });
+    term
+}
+
+/// Mouse reporting off, then leave the alternate screen and raw mode.
+fn leave_tui() {
+    let _ = execute!(io::stdout(), DisableMouseCapture);
+    ratatui::restore();
+}
+
 /// Leave the TUI, run an action that may prompt on the tty, then come back.
 fn suspended<T>(term: &mut DefaultTerminal, label: &str, cmd: &str, action: impl FnOnce() -> io::Result<T>) -> io::Result<io::Result<T>> {
-    ratatui::restore();
+    leave_tui();
     println!("\n-- nvprofile: {label} --\n$ {cmd}\n");
     let out = action();
     match &out {
@@ -181,58 +225,161 @@ fn suspended<T>(term: &mut DefaultTerminal, label: &str, cmd: &str, action: impl
         Err(e) => println!("\nfailed: {e}\nPress Enter to return to nvprofile."),
     }
     io::stdin().read_line(&mut String::new())?;
-    *term = ratatui::init();
+    *term = enter_tui();
     Ok(out)
 }
 
 fn event_loop(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     let mut last = Instant::now();
+    let mut dirty = true;
     loop {
         if last.elapsed() >= Duration::from_secs(1) {
             app.refresh();
             last = Instant::now();
+            dirty = true;
         }
-        term.draw(|f| draw(f, app))?;
+        // Redraw only when something changed: mouse-move reports can arrive in floods.
+        if dirty {
+            term.draw(|f| draw(f, app))?;
+            dirty = false;
+        }
         if !event::poll(Duration::from_millis(200))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else { continue };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            return Ok(());
-        }
-        let mode = std::mem::replace(&mut app.mode, Mode::Normal);
-        match mode {
-            Mode::Normal => {
-                if handle_normal(app, key.code) {
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     return Ok(());
                 }
-            }
-            Mode::ConfirmApply(p) => {
-                if matches!(key.code, KeyCode::Char('y' | 'Y')) {
-                    app.apply(term, &p)?;
-                } else {
-                    app.say(true, "cancelled");
+                if dispatch_key(term, app, key.code)? {
+                    return Ok(());
                 }
+                dirty = true;
             }
-            Mode::ConfirmDelete(id) => {
-                if matches!(key.code, KeyCode::Char('y' | 'Y')) {
-                    match app.ctx.store.delete(&id) {
-                        Ok(()) => {
-                            app.say(true, format!("deleted '{id}'"));
-                            app.reload_presets(None);
-                            app.refresh();
-                        }
-                        Err(e) => app.say(false, e.to_string()),
+            Event::Mouse(m) => {
+                if handle_mouse(term, app, m)? {
+                    return Ok(());
+                }
+                dirty = matches!(m.kind, MouseEventKind::Down(_) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown);
+            }
+            Event::Resize(..) => dirty = true,
+            _ => {}
+        }
+    }
+}
+
+/// One key press in the current mode. Returns true to quit. Footer buttons call
+/// this with their equivalent key, so mouse and keyboard cannot diverge.
+fn dispatch_key(term: &mut DefaultTerminal, app: &mut App, code: KeyCode) -> io::Result<bool> {
+    let mode = std::mem::replace(&mut app.mode, Mode::Normal);
+    match mode {
+        Mode::Normal => {
+            if handle_normal(app, code) {
+                return Ok(true);
+            }
+        }
+        Mode::ConfirmApply(p) => {
+            if matches!(code, KeyCode::Char('y' | 'Y')) {
+                app.apply(term, &p)?;
+            } else {
+                app.say(true, "cancelled");
+            }
+        }
+        Mode::ConfirmDelete(id) => {
+            if matches!(code, KeyCode::Char('y' | 'Y')) {
+                match app.ctx.store.delete(&id) {
+                    Ok(()) => {
+                        app.say(true, format!("deleted '{id}'"));
+                        app.reload_presets(None);
+                        app.refresh();
                     }
-                } else {
-                    app.say(true, "cancelled");
+                    Err(e) => app.say(false, e.to_string()),
                 }
+            } else {
+                app.say(true, "cancelled");
             }
-            Mode::Edit(e) => handle_edit(app, e, key.code),
-            Mode::NameInput(e, name) => handle_name(app, e, name, key.code),
+        }
+        Mode::Edit(e) => handle_edit(app, e, code),
+        Mode::NameInput(e, name) => handle_name(app, e, name, code),
+    }
+    Ok(false)
+}
+
+/// Left click / wheel. Returns true to quit. While a prompt or the name box is
+/// open only its own buttons react; everything else is ignored.
+fn handle_mouse(term: &mut DefaultTerminal, app: &mut App, m: MouseEvent) -> io::Result<bool> {
+    let (x, y) = (m.column, m.row);
+    match m.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(b) = hit::button_at(&app.rects.buttons, x, y) {
+                return dispatch_key(term, app, b.key());
+            }
+            match app.mode {
+                Mode::Normal => click_list(app, x, y),
+                Mode::Edit(_) => click_edit(app, x, y),
+                _ => {}
+            }
+        }
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            let up = m.kind == MouseEventKind::ScrollUp;
+            match app.mode {
+                Mode::Normal if hit::contains(app.rects.list, x, y) => {
+                    let n = app.presets.len();
+                    let cur = app.list.selected().unwrap_or(0);
+                    let next = if up { cur.saturating_sub(1) } else { (cur + 1).min(n.saturating_sub(1)) };
+                    app.list.select(Some(next));
+                }
+                Mode::Edit(_) if hit::contains(app.rects.details, x, y) => {
+                    // Wheel up raises the value, like the right arrow.
+                    let row = app.rects.edit_rows.iter().position(|(r, ..)| hit::contains(*r, x, y));
+                    adjust_edit(app, row, if up { 1.0 } else { -1.0 });
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+/// Same as Enter on `idx`: open the apply confirm prompt.
+fn request_apply(app: &mut App, idx: usize) {
+    if let Some(p) = app.presets.get(idx).cloned() {
+        app.mode = Mode::ConfirmApply(p);
+    }
+}
+
+fn click_list(app: &mut App, x: u16, y: u16) {
+    let r = &app.rects;
+    let Some(i) = hit::list_row_at(r.list_inner, r.list_offset, app.presets.len(), x, y) else { return };
+    app.list.select(Some(i));
+    if app.clicks.click(i, Instant::now()) == Click::Double {
+        app.clicks.reset();
+        request_apply(app, i);
+    }
+}
+
+fn click_edit(app: &mut App, x: u16, y: u16) {
+    let Some(i) = app.rects.edit_rows.iter().position(|(row, ..)| hit::contains(*row, x, y)) else { return };
+    let (_, left, right) = app.rects.edit_rows[i];
+    let dir = if hit::contains(left, x, y) {
+        -1.0
+    } else if hit::contains(right, x, y) {
+        1.0
+    } else {
+        0.0
+    };
+    adjust_edit(app, Some(i), dir);
+}
+
+/// Select edit row `row` (if any) and step its value by `dir` (0 = select only).
+fn adjust_edit(app: &mut App, row: Option<usize>, dir: f64) {
+    if let Mode::Edit(e) = &mut app.mode {
+        if let Some(i) = row {
+            e.field = i;
+        }
+        if dir != 0.0 {
+            adjust(&mut e.preset, e.field, dir, &app.limits);
         }
     }
 }
@@ -244,11 +391,7 @@ fn handle_normal(app: &mut App, code: KeyCode) -> bool {
         KeyCode::Char('q') | KeyCode::Esc => return true,
         KeyCode::Up | KeyCode::Char('k') => app.list.select(Some(cur.saturating_sub(1))),
         KeyCode::Down | KeyCode::Char('j') => app.list.select(Some((cur + 1).min(n.saturating_sub(1)))),
-        KeyCode::Enter => {
-            if let Some(p) = app.selected().cloned() {
-                app.mode = Mode::ConfirmApply(p);
-            }
-        }
+        KeyCode::Enter => request_apply(app, cur),
         KeyCode::Char('r') => {
             if let Some(stock) = app.presets.iter().find(|p| p.id == "stock").cloned() {
                 app.mode = Mode::ConfirmApply(stock);
@@ -260,8 +403,9 @@ fn handle_normal(app: &mut App, code: KeyCode) -> bool {
                 copy.builtin = false;
                 copy.name = format!("{} (edited)", p.name);
                 copy.id = String::new();
+                let from = p.id.clone();
                 app.mode = Mode::Edit(Edit { preset: copy, field: 0 });
-                app.say(true, "editing a copy: ↑↓ field · ←→ adjust · s save as user preset · Esc cancel");
+                app.say(true, format!("editing a copy of '{from}'"));
             }
         }
         KeyCode::Char('d') => match app.selected() {
@@ -287,7 +431,7 @@ fn handle_edit(app: &mut App, mut e: Edit, code: KeyCode) {
         KeyCode::Char('s') => {
             let name = e.preset.name.clone();
             app.mode = Mode::NameInput(e, name);
-            app.say(true, "name the preset, Enter to save, Esc to go back");
+            app.say(true, "");
             return;
         }
         _ => {}
@@ -367,13 +511,17 @@ fn ratio(v: f64, max: f64) -> f64 {
     }
 }
 
+/// A one-row bar with its value printed *before* the bar, so the label never
+/// sits on top of the fill colour.
 fn gauge(f: &mut Frame, area: Rect, title: &str, r: f64, label: String, color: Color) {
     f.render_widget(
-        Gauge::default()
+        LineGauge::default()
             .block(Block::bordered().title(title.to_owned()))
-            .gauge_style(Style::new().fg(color))
+            .filled_style(Style::new().fg(color).add_modifier(Modifier::BOLD))
+            .unfilled_style(Style::new().fg(Color::DarkGray))
+            .line_set(symbols::line::THICK)
             .ratio(r)
-            .label(label),
+            .label(Line::from(Span::styled(label, Style::new().add_modifier(Modifier::BOLD)))),
         area,
     );
 }
@@ -430,6 +578,9 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .highlight_symbol("");
     f.render_stateful_widget(list, area, &mut app.list);
+    app.rects.list = area;
+    app.rects.list_inner = Block::bordered().inner(area);
+    app.rects.list_offset = app.list.offset();
 }
 
 fn draw_live(f: &mut Frame, area: Rect, app: &App) {
@@ -441,7 +592,7 @@ fn draw_live(f: &mut Frame, area: Rect, app: &App) {
 
     let temp = s.temp_c.unwrap_or(0.0);
     let tcolor = if temp < 70.0 { Color::Green } else if temp < 83.0 { Color::Yellow } else { Color::Red };
-    gauge(f, g_temp, " temp ", ratio(temp, 100.0), format!("{temp:.0} °C{}", s.hotspot_c.map_or(String::new(), |h| format!(" (hotspot {h:.0})"))), tcolor);
+    gauge(f, g_temp, " temp ", ratio(temp, 100.0), format!("{temp:.0} °C{}", s.hotspot_c.filter(|_| g_temp.width >= 34).map_or(String::new(), |h| format!(" (hotspot {h:.0})"))), tcolor);
 
     let cap = s.power_cap_w.unwrap_or(app.limits.power_default_w);
     let draw_w = s.power_draw_w.unwrap_or(0.0);
@@ -483,17 +634,26 @@ fn draw_live(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn draw_details(f: &mut Frame, area: Rect, app: &App) {
+fn draw_details(f: &mut Frame, area: Rect, app: &mut App) {
     let dim = Style::new().fg(Color::DarkGray);
+    let inner = Block::bordered().inner(area);
+    let mut edit_rows = Vec::new();
     let (title, lines): (String, Vec<Line>) = match &app.mode {
         Mode::Edit(e) | Mode::NameInput(e, _) => {
             let row = |sel: bool, label: &str, value: String| {
                 let st = if sel { Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD) } else { Style::new() };
                 Line::from(vec![Span::styled(format!(" {label:<10}"), st), Span::styled(format!(" ◀ {value} ▶"), st)])
             };
+            let (power, fan) = (power_summary(e.preset.power_cap_w), e.preset.fan.summary());
+            for (i, v) in [&power, &fan].into_iter().enumerate() {
+                let y = inner.y + i as u16;
+                if y < inner.bottom() {
+                    edit_rows.push(hit::edit_row_rects(inner, y, Span::raw(v.as_str()).width() as u16));
+                }
+            }
             let mut l = vec![
-                row(e.field == 0, "power cap", power_summary(e.preset.power_cap_w)),
-                row(e.field == 1, "fan", e.preset.fan.summary()),
+                row(e.field == 0, "power cap", power),
+                row(e.field == 1, "fan", fan),
                 Line::from(Span::styled(format!(" v/f        {}", e.preset.vf.summary()), dim)),
             ];
             let issues = validate::issues(&Preset { id: "draft".into(), ..e.preset.clone() }, &app.limits);
@@ -531,34 +691,99 @@ fn draw_details(f: &mut Frame, area: Rect, app: &App) {
             None => (" details ".into(), vec![]),
         },
     };
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(Block::bordered().title(title)), area);
+    // Edit rows must not wrap, or the arrow hit areas would drift from the text.
+    let para = Paragraph::new(lines).block(Block::bordered().title(title));
+    let para = if edit_rows.is_empty() { para.wrap(Wrap { trim: false }) } else { para };
+    f.render_widget(para, area);
+    app.rects.details = area;
+    app.rects.edit_rows = edit_rows;
 }
 
-fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
-    let (help, line) = match &app.mode {
-        Mode::Normal => (
-            " ↑↓ select · Enter apply · r reset to stock · e edit a copy · d delete user preset · q quit".to_owned(),
-            Line::from(Span::styled(format!(" {}", app.msg.text), Style::new().fg(if app.msg.ok { Color::Cyan } else { Color::Red }))),
-        ),
-        Mode::ConfirmApply(p) => (
-            " y confirm · any other key cancels".to_owned(),
-            Line::from(Span::styled(
-                format!(" Apply '{}' ({}, {})? [y/N]", p.name, p.power_cap_w.map_or("driver default power".into(), |w| format!("{w:.0} W")), p.fan.summary()),
-                Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            )),
-        ),
-        Mode::ConfirmDelete(id) => (
-            " y confirm · any other key cancels".to_owned(),
-            Line::from(Span::styled(format!(" Delete user preset '{id}'? [y/N]"), Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
-        ),
-        Mode::Edit(_) => (
-            " ↑↓ field · ←→ adjust (power ±5 W, fan ±1%) · s save as user preset · Esc cancel".to_owned(),
-            Line::from(Span::styled(format!(" {}", app.msg.text), Style::new().fg(if app.msg.ok { Color::Cyan } else { Color::Red }))),
-        ),
-        Mode::NameInput(_, name) => (
-            " type a name · Enter save · Backspace · Esc back".to_owned(),
-            Line::from(vec![Span::styled(" name: ", Style::new().fg(Color::Yellow)), Span::raw(format!("{name}▏")), Span::styled(format!("   {}", if app.msg.ok { "" } else { &app.msg.text }), Style::new().fg(Color::Red))]),
-        ),
+fn help_variants(mode: &Mode) -> Vec<Vec<Seg>> {
+    let sp = || Seg::text(" ");
+    match mode {
+        Mode::Normal => vec![
+            vec![
+                Seg::text(" ↑↓ select  "),
+                Seg::btn("Enter Apply", Button::Apply),
+                sp(),
+                Seg::btn("r Reset", Button::Reset),
+                sp(),
+                Seg::btn("e Edit", Button::Edit),
+                sp(),
+                Seg::btn("d Delete", Button::Delete),
+                sp(),
+                Seg::btn("q Quit", Button::Quit),
+            ],
+            vec![
+                Seg::text(" "),
+                Seg::btn("Apply", Button::Apply),
+                sp(),
+                Seg::btn("Reset", Button::Reset),
+                sp(),
+                Seg::btn("Edit", Button::Edit),
+                sp(),
+                Seg::btn("Delete", Button::Delete),
+                sp(),
+                Seg::btn("Quit", Button::Quit),
+            ],
+            vec![Seg::btn("⏎", Button::Apply), sp(), Seg::btn("r", Button::Reset), sp(), Seg::btn("e", Button::Edit), sp(), Seg::btn("d", Button::Delete), sp(), Seg::btn("q", Button::Quit)],
+        ],
+        Mode::ConfirmApply(_) | Mode::ConfirmDelete(_) => vec![
+            vec![Seg::text(" "), Seg::btn("y Yes", Button::Yes), sp(), Seg::btn("n No", Button::No), Seg::text("  any other key cancels")],
+            vec![Seg::text(" "), Seg::btn("Yes", Button::Yes), sp(), Seg::btn("No", Button::No)],
+        ],
+        Mode::Edit(_) => vec![
+            vec![
+                Seg::text(" "),
+                Seg::btn("s Save", Button::Save),
+                sp(),
+                Seg::btn("Esc Cancel", Button::Cancel),
+                Seg::text("  ↑↓ field · ←→ or wheel adjust (power ±5 W, fan ±1%) · click rows/arrows"),
+            ],
+            vec![Seg::text(" "), Seg::btn("s Save", Button::Save), sp(), Seg::btn("Esc Cancel", Button::Cancel), Seg::text("  ↑↓ field · ←→ adjust")],
+            vec![Seg::text(" "), Seg::btn("Save", Button::Save), sp(), Seg::btn("Cancel", Button::Cancel)],
+        ],
+        Mode::NameInput(..) => vec![
+            vec![Seg::text(" "), Seg::btn("Enter Save", Button::Confirm), sp(), Seg::btn("Esc Back", Button::Cancel), Seg::text("  type a name · Backspace deletes")],
+            vec![Seg::text(" "), Seg::btn("Save", Button::Confirm), sp(), Seg::btn("Back", Button::Cancel)],
+        ],
+    }
+}
+
+fn draw_footer(f: &mut Frame, area: Rect, app: &mut App) {
+    let inner = Block::bordered().inner(area);
+    let segs = hit::pick(help_variants(&app.mode), inner.width);
+    app.rects.buttons = hit::place(&segs, inner);
+
+    let plain = Style::new().fg(Color::DarkGray);
+    let spans: Vec<Span> = segs
+        .iter()
+        .map(|s| match s.button {
+            None => Span::styled(s.text.clone(), plain),
+            Some(Button::Yes) => Span::styled(s.text.clone(), Style::new().fg(Color::Black).bg(Color::Green)),
+            Some(Button::No) => Span::styled(s.text.clone(), Style::new().fg(Color::Black).bg(Color::Red)),
+            Some(_) => Span::styled(s.text.clone(), Style::new().fg(Color::Black).bg(Color::Cyan)),
+        })
+        .collect();
+
+    let msg_style = Style::new().fg(if app.msg.ok { Color::Cyan } else { Color::Red });
+    let prompt = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let line = match &app.mode {
+        Mode::Normal | Mode::Edit(_) if app.msg.text.is_empty() => {
+            Line::from(Span::styled(" click a preset to select · double-click applies · wheel scrolls the list", plain))
+        }
+        Mode::Normal | Mode::Edit(_) => Line::from(Span::styled(format!(" {}", app.msg.text), msg_style)),
+        Mode::ConfirmApply(p) => Line::from(Span::styled(
+            format!(" Apply '{}' ({}, {})? [y/N]", p.name, p.power_cap_w.map_or("driver default power".into(), |w| format!("{w:.0} W")), p.fan.summary()),
+            prompt,
+        )),
+        Mode::ConfirmDelete(id) => Line::from(Span::styled(format!(" Delete user preset '{id}'? [y/N]"), prompt)),
+        Mode::NameInput(_, name) => Line::from(vec![
+            Span::styled(" name: ", Style::new().fg(Color::Yellow)),
+            Span::raw(format!("{name}▏")),
+            Span::styled(format!("   {}", if app.msg.ok { "" } else { &app.msg.text }), Style::new().fg(Color::Red)),
+        ]),
     };
-    f.render_widget(Paragraph::new(vec![Line::from(Span::styled(help, Style::new().fg(Color::DarkGray))), line]).block(Block::bordered()), area);
+    f.render_widget(Paragraph::new(vec![Line::from(spans), line]).block(Block::bordered()), area);
 }

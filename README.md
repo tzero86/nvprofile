@@ -39,8 +39,26 @@ nvprofile delete my-preset
 nvprofile reset            # back to stock (same as `apply stock`)
 ```
 
-TUI keys: `↑/↓` select, `Enter` apply, `r` reset to stock, `e` edit a copy (power/fan),
-`s` save as user preset, `d` delete a user preset, `q` quit.
+### TUI controls
+
+Keys: `↑/↓` select, `Enter` apply, `r` reset to stock, `e` edit a copy (power/fan),
+`s` save as user preset, `d` delete a user preset, `q` quit. Applying and deleting always ask
+`[y/N]` first.
+
+Mouse (any terminal with SGR mouse reporting; the keyboard works the same without it):
+
+| Action | Effect |
+|---|---|
+| Click a preset | select it |
+| Double-click a preset (or click it again within 400 ms) | apply it (opens the same `[y/N]` confirm as `Enter`) |
+| Wheel over the preset list | move the selection (wheel elsewhere is ignored) |
+| Footer buttons `Apply` `Reset` `Edit` `Delete` `Quit` | same as `Enter` `r` `e` `d` `q`, including confirm prompts |
+| Confirm prompt: `Yes` / `No` buttons | same as `y` / any other key; clicks elsewhere are ignored while a prompt is open |
+| Edit mode: click the power or fan row | select it |
+| Edit mode: click `◀` / `▶`, or wheel over a row | adjust by the same step as `←` / `→` (power 5 W, fan 1 %) |
+| Edit mode: `Save` / `Cancel` buttons | same as `s` / `Esc` |
+
+Mouse reporting is switched off on quit, on panic, and while the sudo prompt is on screen.
 
 ## Built-in presets
 
